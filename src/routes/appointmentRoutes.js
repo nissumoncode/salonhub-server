@@ -169,6 +169,7 @@ router.post("/", requireJWT, async (req, res) => {
       serviceId: new ObjectId(serviceId),
       serviceName: service.serviceName,
       category: service.category,
+      image: service.image,
       price: service.price,
       duration: service.duration,
       customerId: new ObjectId(req.user.id),
