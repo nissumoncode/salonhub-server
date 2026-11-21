@@ -4,6 +4,7 @@ import {
   getUsersCollection,
   getServicesCollection,
   getAppointmentsCollection,
+  getTransactionsCollection,
 } from "../config/db.js";
 
 const router = express.Router();
@@ -14,6 +15,7 @@ router.get("/stats", requireJWT, requireAdmin, async (req, res) => {
     const usersCollection = await getUsersCollection();
     const servicesCollection = await getServicesCollection();
     const appointmentsCollection = await getAppointmentsCollection();
+    const transactionsCollection = await getTransactionsCollection();
 
     const [
       totalCustomers,
@@ -21,12 +23,16 @@ router.get("/stats", requireJWT, requireAdmin, async (req, res) => {
       totalAppointments,
       pendingAppointments,
       confirmedAppointments,
+      successfulPayments,
+      pendingPayments,
     ] = await Promise.all([
       usersCollection.countDocuments({ role: "customer" }),
       servicesCollection.countDocuments({ status: "active" }),
       appointmentsCollection.countDocuments({}),
       appointmentsCollection.countDocuments({ status: "Pending" }),
       appointmentsCollection.countDocuments({ status: "Confirmed" }),
+      transactionsCollection.countDocuments({ paymentStatus: "Paid" }),
+      appointmentsCollection.countDocuments({ paymentStatus: "Unpaid" }),
     ]);
 
     res.status(200).json({
@@ -35,6 +41,8 @@ router.get("/stats", requireJWT, requireAdmin, async (req, res) => {
       totalAppointments,
       pendingAppointments,
       confirmedAppointments,
+      successfulPayments,
+      pendingPayments,
     });
   } catch (error) {
     console.error("Dashboard stats error:", error);
