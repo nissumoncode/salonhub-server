@@ -39,3 +39,8 @@ export const getAppointmentsCollection = async () => {
   const database = await connectDB();
   return database.collection("appointments");
 };
+// Transactions collection
+export const getTransactionsCollection = async () => {
+  const database = await connectDB();
+  return database.collection("transactions");
+};

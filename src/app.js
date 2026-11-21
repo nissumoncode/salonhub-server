@@ -7,6 +7,7 @@ import appointmentRoutes from "./routes/appointmentRoutes.js";
 import dashboardRoutes from "./routes/dashboardRoutes.js";
 import userRoutes from "./routes/userRoutes.js";
 import profileRoutes from "./routes/profileRoutes.js";
+import paymentRoutes from "./routes/paymentRoutes.js";
 
 const app = express();
 
@@ -21,8 +22,13 @@ app.use(
 // Better Auth route
 app.all("/api/auth/{*any}", toNodeHandler(auth));
 
+// Stripe Webhook - Raw Body Required
+app.use("/payments/webhook", express.raw({ type: "application/json" }));
+
 // JSON data
 app.use(express.json());
+
+app.use("/payments", paymentRoutes);
 
 // admin all Service routes
 app.use("/profile", profileRoutes);
