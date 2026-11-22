@@ -155,6 +155,12 @@ router.post("/create-checkout-session", requireJWT, async (req, res) => {
 // Check payment status for Payment Success page
 router.get("/verify-session", requireJWT, async (req, res) => {
   try {
+    //bad dete hobe
+    console.log("Verify Session User:", {
+      id: req.user.id,
+      role: req.user.role,
+    });
+
     if (req.user.role !== "customer") {
       return res.status(403).json({
         message: "Only customers can verify their payments.",
