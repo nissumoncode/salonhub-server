@@ -11,11 +11,13 @@ import paymentRoutes from "./routes/paymentRoutes.js";
 
 const app = express();
 
-// Frontend-এর সঙ্গে connection
-cors({
-  origin: ["http://localhost:3000", "https://salonhub-client.vercel.app"],
-  credentials: true,
-});
+// Frontend connection
+app.use(
+  cors({
+    origin: ["http://localhost:3000", "https://salonhub-client.vercel.app"],
+    credentials: true,
+  }),
+);
 
 // Better Auth route
 app.all("/api/auth/{*any}", toNodeHandler(auth));
