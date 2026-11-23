@@ -11,7 +11,7 @@
 - User profile management
 - Salon service management
 - Appointment booking and management
-- Prevent duplicate active appointment bookings for the same date and time
+- Prevention of duplicate active appointment bookings for the same date and time
 - Stripe Checkout integration
 - Stripe webhook signature verification
 - Secure payment confirmation
@@ -53,16 +53,21 @@
 
 ## How to Run the Project Locally
 
-1. Configure all required environment variables.
-2. Start the backend server:
+**Development mode:**
 
-   ```bash
-   npm start
-   ```
+```bash
+npm run dev
+```
 
-3. The server will run at:
+**Start mode:**
 
-   http://localhost:5000
+```bash
+npm start
+```
+
+The server will run at:
+
+http://localhost:5000
 
 ## Required Environment Variables
 

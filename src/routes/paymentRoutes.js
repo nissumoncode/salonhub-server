@@ -1,15 +1,20 @@
 import express from "express";
 import { ObjectId } from "mongodb";
-
 import stripe from "../config/stripe.js";
 import { requireJWT } from "../middleware/authMiddleware.js";
 import { getAppointmentsCollection } from "../config/db.js";
 import { getTransactionsCollection } from "../config/db.js";
+import { randomUUID } from "node:crypto";
 
 const router = express.Router();
 
 // Customer creates Stripe Checkout Session
 router.post("/create-checkout-session", requireJWT, async (req, res) => {
+  let lockAcquired = false;
+  let lockToken;
+  let appointmentId;
+  let appointmentsCollection;
+
   try {
     // Only customers can make payments
     if (req.user.role !== "customer") {
@@ -18,20 +23,21 @@ router.post("/create-checkout-session", requireJWT, async (req, res) => {
       });
     }
 
-    const { appointmentId } = req.body;
+    const { appointmentId: requestedAppointmentId } = req.body;
 
     // Validate appointment ID
-    if (!appointmentId || !ObjectId.isValid(appointmentId)) {
+    if (!requestedAppointmentId || !ObjectId.isValid(requestedAppointmentId)) {
       return res.status(400).json({
         message: "Invalid appointment ID.",
       });
     }
 
-    const appointmentsCollection = await getAppointmentsCollection();
+    appointmentId = new ObjectId(requestedAppointmentId);
+    appointmentsCollection = await getAppointmentsCollection();
 
     // Find appointment belonging to this customer
     const appointment = await appointmentsCollection.findOne({
-      _id: new ObjectId(appointmentId),
+      _id: appointmentId,
       customerId: new ObjectId(req.user.id),
     });
 
@@ -64,85 +70,172 @@ router.post("/create-checkout-session", requireJWT, async (req, res) => {
       });
     }
 
-    // Convert USD to cents
-    const amountInCents = Math.round(price * 100);
+    // Atomically acquire checkout lock
+    lockToken = randomUUID();
 
-    // Reuse an existing open Checkout Session
-    if (appointment.stripeCheckoutSessionId) {
-      const existingSession = await stripe.checkout.sessions.retrieve(
-        appointment.stripeCheckoutSessionId,
-      );
-
-      if (existingSession.status === "open") {
-        return res.status(200).json({
-          url: existingSession.url,
-        });
-      }
-
-      if (
-        existingSession.status === "complete" &&
-        existingSession.payment_status !== "paid"
-      ) {
-        return res.status(409).json({
-          message: "Payment is processing. Please wait for confirmation.",
-        });
-      }
-    }
-
-    const clientUrl = process.env.CLIENT_URL || "http://localhost:3000";
-
-    // Create Stripe Checkout Session
-    const session = await stripe.checkout.sessions.create({
-      mode: "payment",
-
-      line_items: [
-        {
-          price_data: {
-            currency: "usd",
-            product_data: {
-              name: appointment.serviceName,
-              description: `Appointment: ${appointment.date} at ${appointment.timeSlot}`,
-            },
-            unit_amount: amountInCents,
-          },
-          quantity: 1,
-        },
-      ],
-
-      customer_email: appointment.customerEmail || undefined,
-
-      client_reference_id: appointment._id.toString(),
-
-      metadata: {
-        appointmentId: appointment._id.toString(),
-        customerId: req.user.id,
-      },
-
-      success_url: `${clientUrl}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
-
-      cancel_url: `${clientUrl}/payment/cancel`,
-    });
-
-    // Save Checkout Session ID in appointment
-    await appointmentsCollection.updateOne(
+    const lockResult = await appointmentsCollection.updateOne(
       {
-        _id: appointment._id,
+        _id: appointmentId,
         customerId: new ObjectId(req.user.id),
         status: "Confirmed",
         paymentStatus: "Unpaid",
+        $or: [
+          { checkoutSessionLockExpiresAt: { $exists: false } },
+          { checkoutSessionLockExpiresAt: { $lte: new Date() } },
+        ],
       },
       {
         $set: {
-          stripeCheckoutSessionId: session.id,
-          updatedAt: new Date(),
+          checkoutSessionLockToken: lockToken,
+          checkoutSessionLockExpiresAt: new Date(Date.now() + 5 * 60 * 1000),
         },
       },
     );
 
-    return res.status(200).json({
-      message: "Stripe Checkout Session created successfully.",
-      url: session.url,
-    });
+    if (lockResult.modifiedCount !== 1) {
+      return res.status(409).json({
+        message: "Payment session is already being created. Please wait.",
+      });
+    }
+
+    lockAcquired = true;
+
+    try {
+      // Re-fetch appointment after acquiring lock
+      const lockedAppointment = await appointmentsCollection.findOne({
+        _id: appointmentId,
+        customerId: new ObjectId(req.user.id),
+        checkoutSessionLockToken: lockToken,
+      });
+
+      if (!lockedAppointment) {
+        return res.status(409).json({
+          message: "Unable to secure payment session. Please try again.",
+        });
+      }
+
+      // Recheck payment eligibility
+      if (
+        lockedAppointment.status !== "Confirmed" ||
+        lockedAppointment.paymentStatus !== "Unpaid"
+      ) {
+        return res.status(400).json({
+          message: "This appointment is not eligible for payment.",
+        });
+      }
+
+      // Reuse an existing open Checkout Session
+      if (lockedAppointment.stripeCheckoutSessionId) {
+        const existingSession = await stripe.checkout.sessions.retrieve(
+          lockedAppointment.stripeCheckoutSessionId,
+        );
+
+        if (existingSession.status === "open") {
+          return res.status(200).json({
+            url: existingSession.url,
+          });
+        }
+
+        if (existingSession.status === "complete") {
+          return res.status(409).json({
+            message: "Payment is processing. Please wait for confirmation.",
+          });
+        }
+      }
+
+      const clientUrl = process.env.CLIENT_URL || "http://localhost:3000";
+
+      // Create Stripe Checkout Session
+      const session = await stripe.checkout.sessions.create({
+        mode: "payment",
+
+        line_items: [
+          {
+            price_data: {
+              currency: "usd",
+              product_data: {
+                name: lockedAppointment.serviceName,
+                description: `Appointment: ${lockedAppointment.date} at ${lockedAppointment.timeSlot}`,
+              },
+              unit_amount: Math.round(Number(lockedAppointment.price) * 100),
+            },
+            quantity: 1,
+          },
+        ],
+
+        customer_email: lockedAppointment.customerEmail || undefined,
+
+        client_reference_id: lockedAppointment._id.toString(),
+
+        metadata: {
+          appointmentId: lockedAppointment._id.toString(),
+          customerId: req.user.id,
+        },
+
+        success_url: `${clientUrl}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
+
+        cancel_url: `${clientUrl}/payment/cancel`,
+      });
+
+      // Save Checkout Session ID and release lock atomically
+      const saveResult = await appointmentsCollection.updateOne(
+        {
+          _id: lockedAppointment._id,
+          customerId: new ObjectId(req.user.id),
+          status: "Confirmed",
+          paymentStatus: "Unpaid",
+          checkoutSessionLockToken: lockToken,
+        },
+        {
+          $set: {
+            stripeCheckoutSessionId: session.id,
+            updatedAt: new Date(),
+          },
+          $unset: {
+            checkoutSessionLockToken: "",
+            checkoutSessionLockExpiresAt: "",
+          },
+        },
+      );
+
+      if (saveResult.modifiedCount !== 1) {
+        // Expire the unused session if it is still open
+        try {
+          await stripe.checkout.sessions.expire(session.id);
+        } catch (error) {
+          console.error("Unused Checkout Session Expire Error:", error);
+        }
+
+        return res.status(409).json({
+          message: "Unable to save payment session. Please try again.",
+        });
+      }
+
+      return res.status(200).json({
+        message: "Stripe Checkout Session created successfully.",
+        url: session.url,
+      });
+    } finally {
+      // Release lock if it has not already been released
+      if (lockAcquired) {
+        try {
+          await appointmentsCollection.updateOne(
+            {
+              _id: appointmentId,
+              checkoutSessionLockToken: lockToken,
+            },
+            {
+              $unset: {
+                checkoutSessionLockToken: "",
+                checkoutSessionLockExpiresAt: "",
+              },
+            },
+          );
+        } catch (error) {
+          console.error("Checkout Lock Release Error:", error);
+        }
+      }
+    }
   } catch (error) {
     console.error("Create Checkout Session Error:", error);
 
@@ -328,26 +421,32 @@ router.post("/webhook", async (req, res) => {
         });
       }
 
-      // Check whether this transaction was already saved
-      const existingTransaction = await transactionsCollection.findOne({
-        stripeSessionId: session.id,
-      });
-
-      if (!existingTransaction) {
-        await transactionsCollection.insertOne({
-          stripeSessionId: session.id,
-          appointmentId: appointment._id,
-          customerId: appointment.customerId,
-          customerName: appointment.customerName,
-          customerEmail: appointment.customerEmail,
-          serviceName: appointment.serviceName,
-          appointmentDate: appointment.date,
-          amount: session.amount_total / 100,
-          currency: session.currency.toUpperCase(),
-          paymentStatus: "Paid",
-          transactionDate: new Date(session.created * 1000),
-          createdAt: new Date(),
-        });
+      // Save transaction safely using the unique Stripe Session ID
+      try {
+        await transactionsCollection.updateOne(
+          { stripeSessionId: session.id },
+          {
+            $setOnInsert: {
+              stripeSessionId: session.id,
+              appointmentId: appointment._id,
+              customerId: appointment.customerId,
+              customerName: appointment.customerName,
+              customerEmail: appointment.customerEmail,
+              serviceName: appointment.serviceName,
+              appointmentDate: appointment.date,
+              amount: session.amount_total / 100,
+              currency: session.currency.toUpperCase(),
+              paymentStatus: "Paid",
+              transactionDate: new Date(session.created * 1000),
+              createdAt: new Date(),
+            },
+          },
+          { upsert: true },
+        );
+      } catch (error) {
+        if (error.code !== 11000) {
+          throw error;
+        }
       }
 
       // Update appointment only after verified payment
