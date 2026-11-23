@@ -55,6 +55,8 @@ export const requireJWT = async (req, res, next) => {
     req.user = {
       ...payload,
       id: payload.sub,
+      name: currentUser.name || "",
+      email: currentUser.email || "",
       role: currentUser.role,
       isBlocked: currentUser.isBlocked,
     };
